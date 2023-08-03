@@ -80,6 +80,7 @@ public class SimpleScaler implements Scaler {
                 return;
             }else if(!reserveInstances.isEmpty()){
                 mu.unlock();//释放之前占有的idleInstances，不然容易死锁！
+
                 mu.lock();//重新占有锁
                 Instance instance = reserveInstances.pollFirst();
                 instance.setBusy(true);
@@ -160,8 +161,10 @@ public class SimpleScaler implements Scaler {
 
             mu.lock();
             Instance instance = instances.get(instanceId);
+            mu.unlock();
+
             if (instance == null) {
-                mu.unlock();
+                //mu.unlock();
                 responseObserver.onError(new RuntimeException(
                         String.format("request id %s, instance %s not found",
                                 request.getAssigment().getRequestId(), instanceId)));
@@ -170,11 +173,12 @@ public class SimpleScaler implements Scaler {
 
             instance.setLastIdleTime(LocalDateTime.now());
             if (!instance.getBusy()) {
-                mu.unlock();
+                //mu.unlock();
                 logger.warning(String.format("request id %s, instance %s already freed",
                         request.getAssigment().getRequestId(), instanceId));
             } else {
                 instance.setBusy(false);
+                mu.lock();
                 idleInstances.offerFirst(instance);
                 mu.unlock();
             }
@@ -210,8 +214,8 @@ public class SimpleScaler implements Scaler {
             mu.unlock();
             return;
         }
-        instances.remove(instanceID);
         idleInstances.remove(instance);
+        instances.remove(instanceID);//这里注意顺序，如果先获取instance再获取idleinstance可能会跟assign反过来顺序获取竞争死锁
         mu.unlock();
 
         try {
@@ -266,26 +270,29 @@ public class SimpleScaler implements Scaler {
 
                 mu.lock();
                 Iterator<Instance> iterator = idleInstances.iterator();
-                while (iterator.hasNext()) {
-                    Instance instance = iterator.next();
-                    if (instance != null) {
-                        long idleDuration = Duration.between(instance.getLastIdleTime(), LocalDateTime.now()).toMillis();
-                        if (idleDuration > config.getIdleDurationBeforeGC().toMillis()) {
-                            String reason = String.format("Idle duration: %dms, exceed configured duration: %dms",
-                                    idleDuration, config.getIdleDurationBeforeGC().toMillis());
-                            CompletableFuture.runAsync(() -> deleteSlot(Context.current(), instance, UUID.randomUUID().toString(), reason));
-                            logger.info(String.format("Instance %s of app %s is GCed due to idle for %dms",
-                                    instance.getID(), instance.getMeta().getKey(), idleDuration));
+                if(!idleInstances.isEmpty()){
+                    while (iterator.hasNext()) {
+                        Instance instance = iterator.next();
+                        if (instance != null) {
+                            long idleDuration = Duration.between(instance.getLastIdleTime(), LocalDateTime.now()).toMillis();
+                            if (idleDuration > config.getIdleDurationBeforeGC().toMillis()) {
+                                String reason = String.format("Idle duration: %dms, exceed configured duration: %dms",
+                                        idleDuration, config.getIdleDurationBeforeGC().toMillis());
+                                CompletableFuture.runAsync(() -> deleteSlot(Context.current(), instance, UUID.randomUUID().toString(), reason));
+                                logger.info(String.format("Instance %s of app %s is GCed due to idle for %dms",
+                                        instance.getID(), instance.getMeta().getKey(), idleDuration));
+                            }
                         }
                     }
-                }
-                if(idleInstances.isEmpty()){
+                    mu.unlock();
+                }else{
                     Iterator<Instance> iterator1 = reserveInstances.iterator();
                     while(iterator1.hasNext()){
                         idleInstances.offerFirst(reserveInstances.pollFirst());
                     }
+                    mu.unlock();
                 }
-                mu.unlock();
+
             }
         };
 
@@ -296,8 +303,8 @@ public class SimpleScaler implements Scaler {
     public Stats Stats() {
         mu.lock();
         Stats stats = new Stats();
-        stats.setTotalInstance(instances.size());
-        stats.setTotalIdleInstance(idleInstances.size());
+        stats.setTotalInstance(idleInstances.size());
+        stats.setTotalIdleInstance(instances.size());
         mu.unlock();
 
         return stats;

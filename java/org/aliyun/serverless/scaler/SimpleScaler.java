@@ -30,13 +30,16 @@ public class SimpleScaler implements Scaler {
     private final Deque<Instance> reserveInstances;
 
     //当idle实例少于这个数量时，gcloop去启动preCreateInsNum数量的实例以备不时之需
-    private final int preCreateInsNum = 10;
-    private final int leastIdleInsNum = 10;
+    private final int preCreateInsNum = 5;
+    private final int leastIdleInsNum = 5;
     //如果存在的实例数超过这个数，就触发这一机制
     private final int leastInsNum = 5;
 
     static SchedulerProto.Meta meta;
 
+    static int assignTime = 0;
+    static int coldStartTime = 0;
+    static int reserveAssignTime = 0;
     public SimpleScaler(Function function, Config config) {
         try {
             this.config = config;
@@ -60,8 +63,11 @@ public class SimpleScaler implements Scaler {
         Instant start = Instant.now();
         String instanceId = UUID.randomUUID().toString();
         meta = request.getMetaData();
+        mu.lock();
+        assignTime++;
+        mu.unlock();
         try {
-            logger.info("Start assign, request id: " + request.getRequestId());
+            //logger.info("Start assign, request id: " + request.getRequestId());
             mu.lock();
             if (!idleInstances.isEmpty()) {
                 Instance instance = idleInstances.pollFirst();
@@ -70,7 +76,7 @@ public class SimpleScaler implements Scaler {
                 instances.put(instanceID, instance);
                 mu.unlock();
 
-                logger.info(String.format("Finish assign with idleInstance, request id: %s, instance %s reused", request.getRequestId(), instanceID));
+                logger.info(String.format("11111111111Finish assign with idleInstance, request id: %s, instance %s reused", request.getRequestId(), instanceID));
 
                 SchedulerProto.Assignment assignment = SchedulerProto.Assignment.newBuilder()
                         .setRequestId(request.getRequestId()).setMetaKey(instance.getMeta().getKey())
@@ -80,15 +86,15 @@ public class SimpleScaler implements Scaler {
                 return;
             }else if(!reserveInstances.isEmpty()){
                 mu.unlock();//释放之前占有的idleInstances，不然容易死锁！
-
                 mu.lock();//重新占有锁
                 Instance instance = reserveInstances.pollFirst();
                 instance.setBusy(true);
                 String instanceID = instance.getID();
                 instances.put(instanceID, instance);
+                reserveAssignTime++;
                 mu.unlock();
 
-                logger.info(String.format("Finish assign with reserveInstance, request id: %s, instance %s reused", request.getRequestId(), instanceID));
+                logger.info(String.format("2222222Finish assign with reserveInstance, request id: %s, instance %s used", request.getRequestId(), instanceID));
 
                 SchedulerProto.Assignment assignment = SchedulerProto.Assignment.newBuilder()
                         .setRequestId(request.getRequestId()).setMetaKey(instance.getMeta().getKey())
@@ -121,9 +127,9 @@ public class SimpleScaler implements Scaler {
             mu.lock();
             instance.setBusy(true);
             instances.put(instanceID, instance);
+            coldStartTime++;
             mu.unlock();
-
-            logger.info(String.format("request id: %s, instance %s for app %s is created, init latency: %dms",
+            logger.info(String.format("0000000request id: %s, instance %s for app %s is created, init latency: %dms",
                     request.getRequestId(), instanceID, instance.getMeta().getKey(), instance.getInitDurationInMs()));
             SchedulerProto.Assignment assignment = SchedulerProto.Assignment.newBuilder()
                     .setRequestId(request.getRequestId()).setMetaKey(instance.getMeta().getKey())
@@ -135,15 +141,14 @@ public class SimpleScaler implements Scaler {
             logger.info(errorMessage);
             responseObserver.onError(new RuntimeException(errorMessage, e));
         } finally {
-            logger.info(String.format("Finish assign, request id: %s, instance id: %s, cost %dms",
-                    request.getRequestId(), instanceId, Duration.between(start, Instant.now()).toMillis()));
+            //logger.info(String.format("Finish assign, request id: %s, instance id: %s, cost %dms",request.getRequestId(), instanceId, Duration.between(start, Instant.now()).toMillis()));
         }
     }
 
     @Override
     public void Idle(Context ctx, SchedulerProto.IdleRequest request, StreamObserver<SchedulerProto.IdleReply> responseObserver) throws Exception {
         if (!request.getAssigment().isInitialized()) {
-            responseObserver.onError(new RuntimeException("assignment is null"));
+            //responseObserver.onError(new RuntimeException("assignment is null"));
             return;
         }
 
@@ -152,7 +157,7 @@ public class SimpleScaler implements Scaler {
         long start = System.currentTimeMillis();
         String instanceId = request.getAssigment().getInstanceId();
         try {
-            logger.info(String.format("Start idle, request id: %s", request.getAssigment().getRequestId()));
+            //logger.info(String.format("Start idle, request id: %s", request.getAssigment().getRequestId()));
             boolean needDestroy = false;
             String slotId = "";
             if (request.getResult().isInitialized() && request.getResult().getNeedDestroy()) {
@@ -198,8 +203,7 @@ public class SimpleScaler implements Scaler {
             responseObserver.onCompleted();
         } finally {
             long cost = System.currentTimeMillis() - start;
-            logger.info(String.format("Idle, request id: %s, instance: %s, cost %dus%n",
-                    request.getAssigment().getRequestId(), instanceId, cost));
+            //logger.info(String.format("Idle, request id: %s, instance: %s, cost %dus%n", request.getAssigment().getRequestId(), instanceId, cost));
         }
     }
 
@@ -228,16 +232,21 @@ public class SimpleScaler implements Scaler {
     }
 
     private void gcLoop() {
-        logger.info(String.format("gc loop for app: %s is starting, %d instance is alive and %d idleInstance", function.getKey(), instances.size(), idleInstances.size()));
+        //logger.info(String.format("coldStartRate: %3f",(double) coldStartTime/assignTime));
+        //logger.info(String.format("**************gc loop for app: %s is starting, %d instance is alive and %d idleInstance", function.getKey(), instances.size(), idleInstances.size()));
+        //logger.info(String.format("**************idleInstances:%d, instances:%d, reserveInstances:%d",idleInstances.size(), instances.size(), reserveInstances.size()));
         Timer timer = new Timer();
         TimerTask task = new TimerTask() {
             @Override
             public void run() {
+                //logger.info(String.format(",,,,,,,,,,,,,,gc loop for app: %s is starting, %d instance is alive and %d idleInstance", function.getKey(), instances.size(), idleInstances.size()));
+                logger.info(String.format("idleInstances:%d, instances:%d, reserveInstances:%d",idleInstances.size(), instances.size(), reserveInstances.size()));
+                logger.info(String.format("reserveAssignTime:%d,coldStartTime:%d,assignTime:%d,coldStartRate:%3f",reserveAssignTime,coldStartTime,assignTime,(double) coldStartTime/assignTime));
                 Context ctx = Context.current();
-                if(instances.size() > leastInsNum && idleInstances.size() < leastIdleInsNum){
                     try{
-                        List<Instance> cycCreateInstances = new ArrayList<>();
-                        for(int i = 0; i < preCreateInsNum; i ++){
+                        int addNum = preCreateInsNum - reserveInstances.size();
+                        for(int i = 0;i < addNum;i++){
+                            logger.info(String.format("reserveInstance added"));
                             SchedulerProto.ResourceConfig resourceConfig = SchedulerProto.ResourceConfig.newBuilder()
                                     .setMemoryInMegabytes(meta.getMemoryInMb()).build();
                             SlotResourceConfig slotResourceConfig = new SlotResourceConfig(resourceConfig);
@@ -254,19 +263,15 @@ public class SimpleScaler implements Scaler {
 
                             ListenableFuture<Instance> instanceFuture = platformClient.Init(ctx, "fake request", UUID.randomUUID().toString(), slot, function);
                             Instance instance = instanceFuture.get();
-                            cycCreateInstances.add(instance);
-                            logger.info(String.format("request id: %s, instance %s for app %s is created, init latency: %dms",
-                                    "fake request", instance.getID(), instance.getMeta().getKey(), instance.getInitDurationInMs()));
+                            instance.setBusy(false);
+                            cycQueLock.lock();
+                            reserveInstances.offerFirst(instance);
+                            cycQueLock.unlock();
                         }
-                        cycQueLock.lock();
-                        for(int i = 0;i < cycCreateInstances.size();i++){
-                            reserveInstances.offerFirst(cycCreateInstances.get(i));
-                        }
-                        cycQueLock.unlock();
                     }catch(Exception e){
 
                     }
-                }
+
 
                 mu.lock();
                 Iterator<Instance> iterator = idleInstances.iterator();
@@ -285,17 +290,16 @@ public class SimpleScaler implements Scaler {
                         }
                     }
                     mu.unlock();
-                }else{
-                    Iterator<Instance> iterator1 = reserveInstances.iterator();
-                    while(iterator1.hasNext()){
-                        idleInstances.offerFirst(reserveInstances.pollFirst());
-                    }
-                    mu.unlock();
                 }
-
+//                else {
+//                    Iterator<Instance> iterator1 = reserveInstances.iterator();
+//                    while(iterator1.hasNext()){
+//                        idleInstances.offerFirst(reserveInstances.pollFirst());
+//                    }
+//                    mu.unlock();
+//                }
             }
         };
-
         timer.schedule(task, 0, this.config.getGcInterval().toMillis());
     }
 
